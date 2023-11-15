@@ -110,8 +110,8 @@ void im2col(const float* data_im, float* data_col, int H, int W, int C, int N)
             int c_num = col_j/C;
             int d_i = (col_j%C)/3 - 1;
             int d_j = (col_j%C)%3 - 1;
-            int im_i = w_i + dx;
-            int im_j = w_j + dy;
+            int im_i = w_i + d_i;
+            int im_j = w_j + d_j;
             if(im_i < 0 || im_j < 0 || im_i >= H || im_j >= W) data_col[col_i*length + col_j] = 0;
             else data_col[col_i*length + col_j] = data_im[c_num*H*W + im_i*W + im_j];
         }
@@ -131,8 +131,8 @@ void im2col(const float* data_im, float* data_col, int H, int W, int C, int N)
             int c_num = col_j/C;
             int d_i = (col_j%C)/3 - 1;
             int d_j = (col_j%C)%3 - 1;
-            int im_i = w_i + dx;
-            int im_j = w_j + dy;
+            int im_i = w_i + d_i;
+            int im_j = w_j + d_j;
             if(im_i < 0 || im_j < 0 || im_i >= H || im_j >= W) data_col[col_i*length + col_j] = 0;
             else data_col[col_i*length + col_j] = data_im[batch_num*H*W*C + c_num*H*W + im_i*W + im_j];
         }
@@ -147,9 +147,9 @@ void convolution_forward(const float* data_im, const float* data_kernel, float* 
     int k = 3;
     im2col(data_im, data_col, H, W, C_in, batch_size);
     /* col_matrix (N*H*W,c_in*k*k) kernel_matrix (c_in*k*k,c_out) */
-    int space = C*H*W*batch_size*sizeof(int);
-    float* output_matrix = (float*)malloc(sizeof(space))
-    gemm_gpu(CUBLAS_OP_T,CUBLAS_OP_N,data_col,data_kernel,output_matrix,N*H*W,C_in*k*k,C_out,1.0,0.0);
+    int space = C_in*H*W*batch_size*sizeof(int);
+    float* output_matrix = (float*)malloc(sizeof(space));
+    gemm_gpu(CUBLAS_OP_T,CUBLAS_OP_N,data_col,data_kernel,output_matrix,batch_size*H*W,C_in*k*k,C_out,1.0,0.0);
     // /* we get the output matrix (batch_size*H*W,c_out), we have to transfer the data from matrix to output*/
     // output = (float*)malloc(sizeof(space));
     // for(int batch_num = 0; batch_num < batch_size; batch_num ++)
@@ -173,7 +173,7 @@ void convolution_backward(const float* data_im, const float* data_kernel, float*
     int k = 3;
     im2col(data_im, data_col, H, W, C_in, batch_size);
     /* compute grad_weights */
-    gemm_gpu(CUBLAS_OP_N, CUBLAS_OP_N, grad_col, grad_output, grad_weights, C_in*k*k, batch_size*H*W, C_out, 1.0, 0.0);
+    gemm_gpu(CUBLAS_OP_N, CUBLAS_OP_N, grad_in_col, grad_output, grad_weights, C_in*k*k, batch_size*H*W, C_out, 1.0, 0.0);
     /* compute grad_in_col */
     gemm_gpu(CUBLAS_OP_N, CUBLAS_OP_T, grad_output, data_kernel, grad_in_col, batch_size*H*W, C_out, C_in*k*k, 1.0, 0.0);
     /* compute grad_in_im from grad_in_col */
@@ -196,14 +196,14 @@ void convolution_backward(const float* data_im, const float* data_kernel, float*
 
 /* in this function, we try to implement max pooling layer, to simplify our code, we set kernel size is 2*2 
    the stride is also 2, and we consider no padding. so we don't have to set the parameters seperately */
-__global__ void max_pool_forward(float* in_data, int nthreads, int batch_size, int channels, int H, int W, int out_H, int out_W
+__global__ void max_pool_forward(float* in_data, int nthreads, int batch_size, int channels, int H, int W, int out_H, int out_W,
                                  float* out_data, float* out_mask)
 {
     CUDA_KERNEL_LOOP(index, nthreads){
-        int n = index / out_w / out_h / channels;
-        int c = (index / out_w / out_h) % channels;
-        int ph = (index / out_w) % out_h;
-        int pw = index % out_w;
+        int n = index / out_W / out_H / channels;
+        int c = (index / out_W / out_H) % channels;
+        int ph = (index / out_W) % out_H;
+        int pw = index % out_W;
         int im_h = ph*2;
         int im_w = pw*2;
         int location = n*H*W*channels + c*H*W + im_h*W + im_w;
@@ -224,32 +224,32 @@ __global__ void max_pool_forward(float* in_data, int nthreads, int batch_size, i
             max_value = in_data[location + W + 1];
             max_mask = location + W + 1;
         }
-        out_data[n*out_h*out_w*channels + c*out_h*out_w + ph*out_w + out_h] = max_value;
-        out_mask[n*out_h*out_w*channels + c*out_h*out_w + ph*out_w + out_h] = max_mask;
+        out_data[n*out_H*out_W*channels + c*out_H*out_W + ph*out_W + out_H] = max_value;
+        out_mask[n*out_H*out_W*channels + c*out_H*out_W + ph*out_W + out_H] = max_mask;
     }
     return;
 }
 
-__global__ void max_pool_backward(float* in_data, int nthreads, int batch_size, int channels, int H, int W, int out_H, int out_W
+__global__ void max_pool_backward(float* in_data, int nthreads, int batch_size, int channels, int H, int W, int out_H, int out_W,
                                  float* out_data, float* out_mask, float* out_gradient, float* input_gradient)
 {
     CUDA_KERNEL_LOOP(index, nthreads){
-        int n = index / out_w / out_h / channels;
-        int c = (index / out_w / out_h) % channels;
-        int ph = (index / out_w) % out_h;
-        int pw = index % out_w;
-        int location = n*out_w*out_h*channels + c*out_w*out_h + ph*out_w + pw;
-        input_gradient[out_mask[location]] = out_gradient[location]*out_data[location];
+        int n = index / out_W / out_H / channels;
+        int c = (index / out_W / out_H) % channels;
+        int ph = (index / out_W) % out_H;
+        int pw = index % out_W;
+        int location = n*out_W*out_H*channels + c*out_W*out_H + ph*out_W + pw;
+        input_gradient[int(out_mask[location])] = out_gradient[location]*out_data[location];
     }
     return;
 }
 
-__global__ void thread_row(float* in_data, int batch_size, int c, float* out_data, string mode)
+__global__ void thread_row(float* in_data, int batch_size, int c, float* out_data, std::string mode)
 {
-    nthreads = batch_size;
+    int nthreads = batch_size;
     CUDA_KERNEL_LOOP(index, nthreads){
-        float out_data[index] = in_data[index*c]
-        for(int i=1; i < c; i ++)
+        //float out_data[index] = in_data[index*c];
+        for(int i=0; i < c; i ++)
         {
             if(mode == "max")
             {
@@ -267,9 +267,9 @@ __global__ void thread_row(float* in_data, int batch_size, int c, float* out_dat
     return;
 }
 
-__global__ map_operation(float* in_data, int batch_size, int c, float* value_data, string mode)
+__global__ void map_operation(float* in_data, int batch_size, int c, float* value_data, std::string mode)
 {
-    nthreads = batch_size*c;
+    int nthreads = batch_size*c;
     CUDA_KERNEL_LOOP(index, nthreads){
         if(mode == "substract")
         {
@@ -321,11 +321,11 @@ void softmax(float* in_data, int batch_size, int c)
 
 __global__ void CE_loss_forward(float* in_data, float* label, float* loss, int batch_size, int c)
 {
-    nthreads = batch_size;
+    int nthreads = batch_size;
     CUDA_KERNEL_LOOP(index, nthreads){
         for(int i = 0; i < c; i ++)
         {
-            loss[index] += -labe[index*c + i]*log(in_data[index*c + i]);
+            loss[index] += -label[index*c + i]*log(in_data[index*c + i]);
         }
         loss[index] /= c;
     }
@@ -336,9 +336,9 @@ __global__ void CE_loss_forward(float* in_data, float* label, float* loss, int b
 
 __global__ void CE_loss_backward(float* in_data, float* label, float* loss, int batch_size, int c, float* in_grad)
 {
-    nthreads = batch_size*c;
+    int nthreads = batch_size*c;
     CUDA_KERNEL_LOOP(index, nthreads){
-        int bacth_num = index / c;
+        int batch_num = index / c;
         int c_num = index % c;
         in_grad[batch_num*c + c_num] = (in_data[batch_num*c + c_num] - label[batch_num*c + c_num])/c;
     }
