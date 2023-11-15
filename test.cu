@@ -31,6 +31,16 @@ void matrix_init(float*A, int rows, int cols){
     curandDestroyGenerator(prng);
 }
 
+void matrix_print(float* data, int size)
+{
+    for(int i = 0; i < size; i++)
+    {
+        std::cout << data[i] << " ";
+    }
+    std::cout << std::endl;
+    return;
+}
+
 /* first: fully connected layer */
 
 /* before the impletation of fully connected layer,we have to make some assumptions
@@ -86,23 +96,48 @@ void backward_fc(float* input, float* output, float* weights, float* bias, int b
     return;
 }
 
+void im2col(const float* data_im, float* data_col, int H, int W, int C, int N)
+{
+    int k_size = 3;
+    //int stride = 1;
+    //int padding = 1;
+    /* we consider the last situation: input is N*C*H*W */
+    //int space = N*C*H*W*k_size*k_size*sizeof(float);
+    //data_col = (float*)malloc(sizeof(space));
+    int length = H*W*N;
+    int width = C*k_size*k_size;
+    for(int col_i = 0; col_i < length; col_i ++)
+    {
+        for(int col_j = 0; col_j < width; col_j ++)
+        {
+            int batch_num = col_i/(H*W);
+            int w_i = (col_i%(H*W))/W;
+            int w_j = (col_i%(H*W))%W;
+            int c_num = col_j/(k_size*k_size);
+            int d_i = (col_j%(k_size*k_size))/3 - 1;
+            int d_j = (col_j%(k_size*k_size))%3 - 1;
+            int im_i = w_i + d_i;
+            int im_j = w_j + d_j;
+            if(im_i < 0 || im_j < 0 || im_i >= H || im_j >= W) data_col[col_i*width + col_j] = 0;
+            else data_col[col_i*width + col_j] = data_im[batch_num*H*W*C + c_num*H*W + im_i*W + im_j];
+        }
+    }
+    return;
+}
+
 int main()
 {
     /* batchsize:3 , C_in:2 , C_out:4 . So we can construct our input X (2,3) and weight matrix W (4,2) */
-    int space_x = 6*sizeof(float);
-    int space_w = 8*sizeof(float);
     std::vector<float> X_cpu = {1.0,-2.0, 4.0,-3.0, 5.0,7.0};
     std::vector<float> W_cpu = {-2.0,1.0,3.0,4.0,-2.0,3.0,4.0,6.0};
     std::vector<float> bias = {1.0,-1.0,0,1.0};
-    float *X;
-    float *W;
-    float *B;
-    cudaMalloc(&X,space_x);
-    cudaMalloc(&W,space_w);
+    float *X, *W, *B;
+    cudaMalloc(&X,6*sizeof(float));
+    cudaMalloc(&W,8*sizeof(float));
     cudaMalloc(&B,4*sizeof(float));
 
-    cudaMemcpy(X,X_cpu.data(),space_x,cudaMemcpyHostToDevice);
-    cudaMemcpy(W,W_cpu.data(),space_w,cudaMemcpyHostToDevice);
+    cudaMemcpy(X,X_cpu.data(),6*sizeof(float),cudaMemcpyHostToDevice);
+    cudaMemcpy(W,W_cpu.data(),8*sizeof(float),cudaMemcpyHostToDevice);
     cudaMemcpy(B,bias.data(),4*sizeof(float),cudaMemcpyHostToDevice);
 
     float* output = nullptr;
@@ -112,11 +147,7 @@ int main()
 
     float* Y_cpu = (float*)malloc(12*sizeof(float));
     cudaMemcpy(Y_cpu,output,12*sizeof(float),cudaMemcpyDeviceToHost);
-    for(int i=0; i < 12; i ++)
-    {
-        std::cout << Y_cpu[i] << " ";
-    }
-    std::cout << std::endl;
+    //matrix_print(Y_cpu,12);
 
     /* we let the output to be the grad_output, so that we can test our backward function */
     float *grad_input, *grad_weights, *grad_bias;
@@ -132,17 +163,27 @@ int main()
     cudaMemcpy(grad_input_cpu,grad_input,6*sizeof(float),cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_weights_cpu,grad_weights,8*sizeof(float),cudaMemcpyDeviceToHost);
 
-    for(int i=0; i < 6; i ++)
-    {
-        std::cout << grad_input_cpu[i] << " ";
-    }
-    std::cout << std::endl;
+    //matrix_print(grad_input_cpu,6);
+    //matrix_print(grad_weights_cpu,8);
 
-    for(int i=0; i < 8; i ++)
+    /* next: test the convolution layer */
+    /* test the im2col function first, we assume that the batch_size is 2,the channel is 3,the (H,W) is (5,4) */
+    float *data = (float*)malloc(4*5*3*2*sizeof(float));
+    for(int i = 0; i < 120; i++)
     {
-        std::cout << grad_weights_cpu[i] << " ";
+        data[i] = i;
     }
-    std::cout << std::endl;
+    float* data_col = (float*)malloc(5*4*3*2*3*3);
+    im2col(data, data_col, 5, 4, 3, 2);
+    for(int i = 0; i < 40; i ++)
+    {
+        for(int j = 0; j < 27; j++)
+        {
+            std::cout << data_col[i*27 + j] << " ";
+        }
+        std::cout << std::endl;
+    }
+
 
     return 0;
 }
