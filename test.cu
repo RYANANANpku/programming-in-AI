@@ -51,6 +51,7 @@ void matrix_print(float* data, int size, std::string mode)
             std::cout << data_cpu[i] << " ";
         }
         std::cout << std::endl;
+        free(data_cpu);
     }
     return;
 }
@@ -171,7 +172,6 @@ void convolution_forward(const float* data_im, const float* data_kernel, float* 
     /* first step: compute the im2col matrix */
     int k = 3;
     im2col <<<CudaGetBlocks(H*W*batch_size*C_in*k*k), kCudaThreadsNum>>> (data_im, data_col, H, W, C_in, batch_size);
-    //matrix_print(data_col_gpu,H*W*batch_size*C_in*k*k,"gpu");
 
     /* gemm computation */
     float* output = nullptr;
@@ -190,6 +190,7 @@ void convolution_forward(const float* data_im, const float* data_kernel, float* 
     cudaMemcpy(d_ones, _ones.data(), _ones.size() * sizeof(float), cudaMemcpyHostToDevice);
     gemm_gpu(CUBLAS_OP_N,CUBLAS_OP_T,d_ones,bias,output_gpu,H*W,1,C_out*batch_size,1.0,1.0);
     matrix_print(output_gpu,batch_size*H*W*C_out,"gpu");
+
     
 }
 
@@ -218,20 +219,66 @@ __global__ void col2im(float* input, float*output, int batch_size, int C_in, int
     return;
 }
 
-void convolution_backward(const float* data_im, const float* data_kernel, float* data_col, float* output, int batch_size, int C_in, int H, int W, int C_out,
+__global__ void grad_bias_accumulate(float* grad_output, float* grad_bias, int batch_size, int C_in, int H, int W, int C_out)
+{
+    int nthreads = batch_size*C_out;
+    CUDA_KERNEL_LOOP(index, nthreads)
+    {
+        int batch_num = index / C_out;
+        int c_num = index % C_out;
+        grad_bias[index] = grad_output[batch_num*H*W*C_out + c_num*H*W];
+        for(int i = 1; i < H*W; i ++)
+        {
+            grad_bias[index] += grad_output[batch_num*H*W*C_out + c_num*H*W + i];
+        }
+    }
+    return;
+}
+
+void convolution_backward(const float* data_im, const float* data_kernel, float* data_col, float* output, float* bias, int batch_size, int C_in, int H, int W, int C_out,
                           float* grad_output, float* grad_in_col, float* grad_weights, float* grad_in_im, float* grad_bias)
 {
+
     int k = 3;
     /* reshape the grad_output */
     float* grad_y = nullptr;
     cudaMalloc(&grad_y,batch_size*H*W*C_out*sizeof(float));
     grad_reshape <<<CudaGetBlocks(batch_size*H*W*C_out),kCudaThreadsNum >>> (grad_output,grad_y,batch_size,C_in,H,W,C_out);
+    std::cout << "reshape the grad_output to grad_y" << std::endl;
+    matrix_print(grad_y,batch_size*H*W*C_out,"gpu");
 
-   /* compute the grad_weigths */
-   gemm_gpu(CUBLAS_OP_N,CUBLAS_OP_N,data_col,grad_y,grad_weights,C_in*k*k,batch_size*H*W,C_out,1.0,0.0);
+    /* compute the grad_weigths */
+    gemm_gpu(CUBLAS_OP_T,CUBLAS_OP_N,data_col,grad_y,grad_weights,C_in*k*k,batch_size*H*W,C_out,1.0,0.0);
+    std::cout << "data_col:" << std::endl;
+    matrix_print(data_col,batch_size*H*W*C_out*k*k,"gpu");
+    std::cout << "grad_weights:" << std::endl;
+    matrix_print(grad_weights,C_in*k*k*C_out,"gpu");
 
-   /*compute the grad_in_col */
-   gemm_gpu(CUBLAS_OP_N,CUBLAS_OP_T,grad_y,data_kernel,grad_in_col,batch_size*H*W,C_out,C_in*k*k,1.0,0.0);
+    /* compute the grad_in_col */
+    gemm_gpu(CUBLAS_OP_N,CUBLAS_OP_T,data_kernel,grad_y,grad_in_col,C_in*k*k,C_out,batch_size*H*W,1.0,0.0);
+    std::cout << "grad_in_col:" << std::endl;
+    matrix_print(grad_in_col,C_in*k*k*batch_size*H*W,"gpu");
+
+    /* compute the grad_in_im */
+    col2im <<<CudaGetBlocks(batch_size*H*W*C_in*k*k),kCudaThreadsNum >>> (grad_in_col,grad_in_im,batch_size,C_in,H,W,C_out);
+    std::cout << "grad_in_im:" << std::endl;
+    matrix_print(grad_in_im,batch_size*C_in*H*W,"gpu");
+
+    /* compute the grad_bias */
+    grad_bias_accumulate <<<CudaGetBlocks(batch_size*C_out),kCudaThreadsNum >>> (grad_output, grad_bias, batch_size, C_in, H, W, C_out);
+    std::cout << "grad_bias:" << std::endl;
+    matrix_print(grad_bias,batch_size*C_in,"gpu");
+
+    return;
+}
+
+__global__ void grad_generate(float* in_data, float* out_data)
+{
+    int nthreads = 24;
+    CUDA_KERNEL_LOOP(index, nthreads)
+    {
+        out_data[index] = float(int(in_data[index])/100);
+    }
 }
 
 int main()
@@ -249,6 +296,7 @@ int main()
     cudaMemcpy(W,W_cpu.data(),8*sizeof(float),cudaMemcpyHostToDevice);
     cudaMemcpy(B,bias.data(),4*sizeof(float),cudaMemcpyHostToDevice);
 
+    /* ---------------------------------------------------------------------------- */
     float* output = nullptr;
     cudaMalloc(&output, 12*sizeof(float));
 
@@ -271,6 +319,7 @@ int main()
     grad_weights_cpu = (float*)malloc(8*sizeof(float));
     cudaMemcpy(grad_input_cpu,grad_input,6*sizeof(float),cudaMemcpyDeviceToHost);
     cudaMemcpy(grad_weights_cpu,grad_weights,8*sizeof(float),cudaMemcpyDeviceToHost);
+    /* ------------------------------------------------------------------------------ */
 
     //matrix_print(grad_input_cpu,6);
     //matrix_print(grad_weights_cpu,8);
@@ -280,7 +329,7 @@ int main()
     float *data = (float*)malloc(3*2*2*2*sizeof(float));
     for(int i = 0; i < 24; i++)
     {
-        data[i] = i;
+        data[i] = i - 12;
     }
     float* data_gpu = nullptr;
     cudaMalloc(&data_gpu,3*2*2*2*sizeof(float));
@@ -300,8 +349,19 @@ int main()
     float* data_col = nullptr;
     cudaMalloc(&data_col,3*2*2*2*3*3*sizeof(float));
     convolution_forward(data_gpu,kernel_gpu,data_col,output_gpu,B,2,2,3,2,2);
-
-
+    /* we try to make grad_ouput */
+    float* grad_output = nullptr;
+    cudaMalloc(&grad_output,24*sizeof(float));
+    grad_generate <<<CudaGetBlocks(24),kCudaThreadsNum >>> (output_gpu,grad_output);
+    std::cout << "grad_ouput matrix:" << std::endl;
+    matrix_print(grad_output,24,"gpu");
+    /* define address for grad_in_col grad_weights grad_in_im grad_bias */
+    float *grad_in_col_2,*grad_weights_2,*grad_in_im_2,*grad_bias_2;
+    cudaMalloc(&grad_in_col_2,3*2*2*2*3*3*sizeof(float));
+    cudaMalloc(&grad_weights_2,36*sizeof(float));
+    cudaMalloc(&grad_in_im_2,3*2*2*2*sizeof(float));
+    cudaMalloc(&grad_bias_2,2*2*sizeof(float));
+    convolution_backward(data_gpu,kernel_gpu,data_col,output_gpu,B,2,2,3,2,2,grad_output,grad_in_col_2,grad_weights_2,grad_in_im_2,grad_bias_2);
 
     return 0;
 }
